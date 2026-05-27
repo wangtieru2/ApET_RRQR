@@ -57,6 +57,7 @@ from transformers.utils import (
 from transformers.utils.import_utils import is_torch_fx_available
 from transformers.models.llama.configuration_llama import LlamaConfig
 from .utils import cluster_and_merge, fps
+from .rrqr_selection import merge_tokens_to_selected, select_tokens_cpqr_indices
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -1406,7 +1407,8 @@ class LlamaModel(LlamaPreTrainedModel):
             if labels is None:
                 labels = torch.full((batch_size, features.shape[1]), IGNORE_INDEX, device=features.device)  # (1, 362)
             k = self.basis_token_num
-            selection_method = 'fps'  # 默认fps
+            basis_selection_method = 'fps'
+            apet_selection_method = getattr(self, "apet_selection_method", "apet_error")
             for i in range(batch_size):
                 image_index = self.image_token_posi[i]  # 35
                 if image_index == -1:
@@ -1420,24 +1422,50 @@ class LlamaModel(LlamaPreTrainedModel):
                 image_embeds = features[i][image_index:text_index, :]
                 N, D = image_embeds.shape
 
-                if selection_method == 'dpc':
+                if apet_selection_method in {"rrqr", "cpqr"}:
+                    rrqr_indices = select_tokens_cpqr_indices(
+                        image_embeds,
+                        keep_length[i],
+                        center=getattr(self, "apet_rrqr_center", True),
+                        normalize=getattr(self, "apet_rrqr_normalize", False),
+                        sort_indices=getattr(self, "apet_rrqr_sort_indices", True),
+                    )
+                    image_embeds = merge_tokens_to_selected(image_embeds, rrqr_indices)
+                    image_embeds = image_embeds.to(dtype=features.dtype)
+
+                    new_input_embeds = torch.cat(
+                        [features[i][:image_index, :], image_embeds[rrqr_indices], features[i][text_index:, :]],
+                        dim=0)
+                    new_labels = torch.cat([labels[i][:image_index], labels[i][rrqr_indices], labels[i][text_index:]],
+                                           dim=0)
+                    new_attention_mask = torch.cat([attention_mask[i][:image_index], attention_mask[i][rrqr_indices],
+                                                    attention_mask[i][text_index:]], dim=0)
+
+                    features_list.append(new_input_embeds)
+                    attention_mask_list.append(new_attention_mask)
+                    labels_list.append(new_labels)
+                    continue
+                if apet_selection_method != "apet_error":
+                    raise ValueError(f"Unknown ApET selection_method: {apet_selection_method}")
+
+                if basis_selection_method == 'dpc':
                     # Density Peak Clustering
                     seed_features = cluster_and_merge(image_embeds.unsqueeze(0), k).squeeze(0)
 
-                elif selection_method == 'fps':
+                elif basis_selection_method == 'fps':
                     # Farthest Point Sampling
                     x = image_embeds.unsqueeze(0)  # [1, N, D]
                     fps_idx = fps(x, k).unsqueeze(-1).expand(-1, -1, D)  # [1, k, D]
                     seed_features = x.gather(1, fps_idx).squeeze(0)  # [k, D]
 
-                elif selection_method == 'random':
+                elif basis_selection_method == 'random':
                     # Random Sampling
                     rand_idx = torch.randint(0, N, (k,), device=image_embeds.device)
                     rand_idx = rand_idx.unsqueeze(-1).expand(-1, D)  # [k, D]
                     seed_features = image_embeds.gather(0, rand_idx)  # [k, D]
 
                 else:
-                    raise ValueError(f"Unknown seed selection method: {selection_method}. "
+                    raise ValueError(f"Unknown seed selection method: {basis_selection_method}. "
                                      f"Supported: 'dpc', 'fps', 'random'")
 
                 image_embeds = image_embeds.float()

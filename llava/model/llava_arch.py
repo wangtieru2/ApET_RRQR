@@ -32,6 +32,7 @@ from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH
 from llava.mm_utils import get_anyres_image_grid_shape
 import sys
 from .utils import cluster_and_merge, fps
+from .rrqr_selection import merge_tokens_to_selected, select_tokens_cpqr_indices
 
 
 class LlavaMetaModel:
@@ -201,6 +202,23 @@ class LlavaMetaForCausalLM(ABC):
             index_mask = torch.ones(B, N, dtype=torch.bool, device=image_features.device)
             image_features = self.get_model().mm_projector(image_features)
             return image_features, index_mask
+
+        apet_selection_method = getattr(self.model, "apet_selection_method", "apet_error")
+        if apet_selection_method in {"rrqr", "cpqr"}:
+            selected_indices = select_tokens_cpqr_indices(
+                image_features,
+                visual_token_num,
+                center=getattr(self.model, "apet_rrqr_center", True),
+                normalize=getattr(self.model, "apet_rrqr_normalize", False),
+                sort_indices=getattr(self.model, "apet_rrqr_sort_indices", True),
+            )
+            image_features = merge_tokens_to_selected(image_features, selected_indices)
+            index_mask = torch.zeros(B, N, dtype=torch.bool, device=image_features.device)
+            index_mask.scatter_(1, selected_indices, True)
+            image_features = self.get_model().mm_projector(image_features)
+            return image_features, index_mask
+        if apet_selection_method != "apet_error":
+            raise ValueError(f"Unknown ApET selection_method: {apet_selection_method}")
 
         k = self.model.basis_token_num
 

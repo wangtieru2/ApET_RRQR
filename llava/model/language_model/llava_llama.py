@@ -80,6 +80,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         images: Optional[torch.FloatTensor] = None,
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         
@@ -102,7 +103,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             )
         
         start_time = time.time()
-        out = super().forward(
+        forward_kwargs = dict(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -114,6 +115,9 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict
             )
+        if cache_position is not None:
+            forward_kwargs["cache_position"] = cache_position
+        out = super().forward(**forward_kwargs)
 
         end_time = time.time()
         elapsed_time = end_time - start_time

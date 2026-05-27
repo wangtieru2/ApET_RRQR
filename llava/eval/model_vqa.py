@@ -10,6 +10,7 @@ from llava.conversation import conv_templates, SeparatorStyle
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
+from llava.eval.pruning_utils import configure_apet_pruning, parse_optional_list, should_use_llm_pruning
 
 from PIL import Image
 import math
@@ -31,10 +32,9 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    if eval(args.layer_list) is not None:
-        llm_pruning = True  # whether to use middle layer pruning at LLM stage
-    else:
-        llm_pruning = False
+    layer_list = parse_optional_list(args.layer_list, "layer_list")
+    image_token_list = parse_optional_list(args.image_token_list, "image_token_list")
+    llm_pruning = should_use_llm_pruning(args, layer_list)
 
     selected_indices = []
 
@@ -47,12 +47,7 @@ def eval_model(args):
                                                                            selected_indices=selected_indices
                                                                            )
     # tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
-    model_class_name = type(model).__name__
-    if model_class_name == "LlavaLlamaForCausalLM_X":
-        model.model.basis_token_num = args.basis_token_num
-        model.model.layer_list = eval(args.layer_list)
-        model.model.image_token_list = eval(args.image_token_list)
-        model.model.image_token_list.insert(0, args.visual_token_num)
+    configure_apet_pruning(model, args, layer_list, image_token_list)
 
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -119,9 +114,11 @@ if __name__ == "__main__":
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--layer_list", type=str, default=None)
     parser.add_argument("--image_token_list", type=str, default=None)
-    parser.add_argument("--llm_pruning", action='store_true')
+    parser.add_argument("--llm_pruning", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--no_llm_pruning", dest="llm_pruning", action="store_false")
     parser.add_argument("--visual_token_num", type=int, default=576)
     parser.add_argument("--basis_token_num", type=int, default=10)
+    parser.add_argument("--selection_method", type=str, default=None, choices=["apet_error", "rrqr", "cpqr"])
     args = parser.parse_args()
 
     eval_model(args)
